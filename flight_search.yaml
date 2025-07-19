@@ -1,0 +1,42 @@
+searches:
+  - name: "US to Asia Thanksgiving"
+    origins: ["sfo", "lax", "sea", "iah", "dfw"]
+    destinations: ["nrt", "hnd", "icn", "tpe", "hkg"]
+    start_date: "2025-11-20"
+    end_date: "2025-11-25"
+    description: "Thanksgiving trip to Asia - outbound"
+
+  - name: "Asia to US Return"
+    origins: ["nrt", "hnd", "icn", "tpe", "hkg"]
+    destinations: ["sfo", "lax", "sea", "iah", "dfw"]
+    start_date: "2025-12-01"
+    end_date: "2025-12-07"
+    description: "Return from Asia after Thanksgiving"
+
+  - name: "West Coast to Japan Direct"
+    origins: ["sfo", "lax", "sea"]
+    destinations: ["nrt", "hnd"]
+    start_date: "2025-06-01"
+    end_date: "2025-06-15"
+    description: "Summer Japan trip - direct flights only"
+
+  - name: "East Coast to Europe"
+    origins: ["jfk", "ewr", "bos", "iad"]
+    destinations: ["fra", "lhr", "cdg", "ams", "zur"]
+    start_date: "2025-07-01"
+    end_date: "2025-07-31"
+    description: "Summer Europe vacation"
+
+  - name: "Short Weekend Trip"
+    origins: ["sfo"]
+    destinations: ["las", "sea", "pdx"]
+    start_date: "2025-08-01"
+    end_date: "2025-08-03"
+    description: "Quick weekend getaway"
+
+  - name: "Holiday Season Australia"
+    origins: ["lax", "sfo", "dfw"]
+    destinations: ["syd", "mel", "bne"]
+    start_date: "2025-12-18"
+    end_date: "2025-12-25"
+    description: "Holiday trip to Australia"
