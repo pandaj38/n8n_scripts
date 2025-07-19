@@ -13,12 +13,13 @@ Flight search and filtering module for finding business class award seats.
 import itertools
 import json
 import os
+import pickle
 import smtplib
-from dataclasses import dataclass
+import time
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
@@ -66,6 +67,10 @@ class FlightResult:
     is_direct: bool
     airlines: str
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return asdict(self)
+
 
 @dataclass
 class SearchConfig:
@@ -103,6 +108,157 @@ class EmailConfig:
     use_tls: bool = True
 
 
+@dataclass
+class CacheEntry:
+    """Cache entry with TTL support."""
+
+    data: Dict[str, Any]
+    timestamp: float
+    ttl: int  # Time to live in seconds
+
+    def is_expired(self) -> bool:
+        """Check if cache entry has expired."""
+        return time.time() - self.timestamp > self.ttl
+
+    @classmethod
+    def create(cls, data: Dict[str, Any], ttl: int = 3600) -> "CacheEntry":
+        """Create a new cache entry with current timestamp."""
+        return cls(data=data, timestamp=time.time(), ttl=ttl)
+
+
+class PersistentTTLCache:
+    """File-based cache with TTL expiration."""
+
+    def __init__(self, cache_file: Path, default_ttl: int = 3600):
+        """
+        Initialize persistent cache.
+
+        Args:
+            cache_file: Path to cache file
+            default_ttl: Default TTL in seconds (1 hour by default)
+        """
+        self.cache_file = cache_file
+        self.default_ttl = default_ttl
+        self._cache: Dict[str, CacheEntry] = {}
+        self._load_cache()
+
+    def _load_cache(self) -> None:
+        """Load cache from file."""
+        try:
+            if self.cache_file.exists():
+                with open(self.cache_file, "rb") as f:
+                    self._cache = pickle.load(f)
+                # Clean up expired entries on load
+                self._cleanup_expired()
+        except (pickle.PickleError, EOFError, OSError) as e:
+            print(f"Warning: Could not load cache file {self.cache_file}: {e}")
+            self._cache = {}
+
+    def _save_cache(self) -> None:
+        """Save cache to file."""
+        try:
+            # Ensure directory exists
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.cache_file, "wb") as f:
+                pickle.dump(self._cache, f)
+        except (pickle.PickleError, OSError) as e:
+            print(f"Warning: Could not save cache file {self.cache_file}: {e}")
+
+    def _cleanup_expired(self) -> None:
+        """Remove expired entries from cache."""
+        expired_keys = [key for key, entry in self._cache.items() if entry.is_expired()]
+        for key in expired_keys:
+            del self._cache[key]
+
+    def get(self, key: str) -> Optional[Dict[str, Any]]:
+        """
+        Get value from cache if not expired.
+
+        Args:
+            key: Cache key
+
+        Returns:
+            Cached value or None if not found/expired
+        """
+        self._cleanup_expired()
+
+        if key in self._cache:
+            entry = self._cache[key]
+            if not entry.is_expired():
+                return entry.data
+            else:
+                # Remove expired entry
+                del self._cache[key]
+
+        return None
+
+    def set(self, key: str, value: Dict[str, Any], ttl: Optional[int] = None) -> None:
+        """
+        Set value in cache with TTL.
+
+        Args:
+            key: Cache key
+            value: Value to cache
+            ttl: Time to live in seconds (uses default if None)
+        """
+        if ttl is None:
+            ttl = self.default_ttl
+
+        self._cache[key] = CacheEntry.create(value, ttl)
+        self._save_cache()
+
+    def clear(self) -> None:
+        """Clear all cache entries."""
+        self._cache.clear()
+        if self.cache_file.exists():
+            self.cache_file.unlink()
+
+    def size(self) -> int:
+        """Get number of entries in cache."""
+        self._cleanup_expired()
+        return len(self._cache)
+
+    def cache_info(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        self._cleanup_expired()
+        total_size = sum(len(str(entry.data)) for entry in self._cache.values())
+        return {
+            "entries": len(self._cache),
+            "cache_file": str(self.cache_file),
+            "approximate_size_bytes": total_size,
+            "default_ttl_seconds": self.default_ttl,
+        }
+
+
+@dataclass
+class SearchSummary:
+    """Summary of search results for JSON output."""
+
+    search_name: str
+    search_description: str
+    origins: List[str]
+    destinations: List[str]
+    start_date: str
+    end_date: str
+    results_count: int
+    results: List[FlightResult]
+    search_timestamp: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "search_name": self.search_name,
+            "search_description": self.search_description,
+            "origins": self.origins,
+            "destinations": self.destinations,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "results_count": self.results_count,
+            "results": [result.to_dict() for result in self.results],
+            "search_timestamp": self.search_timestamp,
+        }
+
+
 class FlightSearcher:
     """Flight search and filtering service."""
 
@@ -117,8 +273,17 @@ class FlightSearcher:
     def __init__(
         self,
         email_config: Optional[EmailConfig] = None,
+        cache_file: Optional[Path] = None,
+        cache_ttl: int = 3600,  # 1 hour default
     ):
-        """Initialize with API credentials from environment and optional email configuration."""
+        """
+        Initialize with API credentials from environment and optional email configuration.
+
+        Args:
+            email_config: Email configuration for notifications
+            cache_file: Path to cache file (defaults to .flight_cache.pkl)
+            cache_ttl: Cache TTL in seconds (default: 1 hour)
+        """
         partner_auth_token = os.environ.get("SEATS_AERO_PARTNER_AUTH", "")
         self.api_url = "https://seats.aero/partnerapi/search"
         self.headers = {
@@ -127,10 +292,14 @@ class FlightSearcher:
         }
         self.email_config = email_config
 
-    @lru_cache(maxsize=128)
+        # Initialize persistent cache
+        if cache_file is None:
+            cache_file = Path.cwd() / ".flight_cache.pkl"
+        self.cache = PersistentTTLCache(cache_file, cache_ttl)
+
     def _fetch_flights(self, params_json: str) -> Dict[str, Any]:
         """
-        Fetch flight data from API with caching.
+        Fetch flight data from API with persistent caching and TTL.
 
         Args:
             params_json: JSON string of search parameters
@@ -138,17 +307,42 @@ class FlightSearcher:
         Returns:
             API response as dictionary
         """
+        # Use params_json as cache key
+        cache_key = f"flight_search:{hash(params_json)}"
+
+        # Try to get from cache first
+        cached_result = self.cache.get(cache_key)
+        if cached_result is not None:
+            print(f"🗂️  Using cached result for search parameters")
+            return cached_result
+
+        # Not in cache or expired, fetch from API
         params = json.loads(params_json)
 
         try:
+            print(f"🌐 Fetching from API...")
             response = requests.get(
                 self.api_url, headers=self.headers, params=params, timeout=30
             )
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+
+            # Cache the result
+            self.cache.set(cache_key, result)
+            return result
+
         except requests.RequestException as e:
             print(f"API request failed: {e}")
             return {"data": []}
+
+    def clear_cache(self) -> None:
+        """Clear all cached flight data."""
+        self.cache.clear()
+        print("✅ Cache cleared successfully")
+
+    def cache_info(self) -> Dict[str, Any]:
+        """Get information about the current cache state."""
+        return self.cache.cache_info()
 
     def _meets_criteria(self, flight_data: Dict[str, Any]) -> bool:
         """
@@ -415,6 +609,49 @@ class FlightSearcher:
 
         return results
 
+    def save_results_to_json(
+        self,
+        search_summaries: List[SearchSummary],
+        output_path: Path,
+        pretty_print: bool = True,
+    ) -> bool:
+        """
+        Save search results to JSON file.
+
+        Args:
+            search_summaries: List of search summaries to save
+            output_path: Path to output JSON file
+            pretty_print: Whether to format JSON with indentation
+
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        try:
+            # Create output data structure
+            output_data = {
+                "search_metadata": {
+                    "timestamp": datetime.now().isoformat(),
+                    "total_searches": len(search_summaries),
+                    "total_flights_found": sum(
+                        summary.results_count for summary in search_summaries
+                    ),
+                },
+                "searches": [summary.to_dict() for summary in search_summaries],
+            }
+
+            # Write to file
+            with open(output_path, "w") as f:
+                if pretty_print:
+                    json.dump(output_data, f, indent=2, default=str)
+                else:
+                    json.dump(output_data, f, default=str)
+
+            return True
+
+        except Exception as e:
+            print(f"Failed to save JSON file: {e}")
+            return False
+
 
 # CLI Application
 app = typer.Typer(help="Search for business class award flights")
@@ -533,6 +770,49 @@ def init_config(
 
 
 @app.command()
+def clear_cache(
+    cache_file: Annotated[
+        Optional[Path], typer.Option("--cache-file", help="Path to cache file")
+    ] = None,
+):
+    """Clear the flight search cache."""
+    if cache_file is None:
+        cache_file = Path.cwd() / ".flight_cache.pkl"
+
+    cache = PersistentTTLCache(cache_file)
+    cache.clear()
+    typer.echo(f"✅ Cache cleared: {cache_file}")
+
+
+@app.command()
+def cache_info(
+    cache_file: Annotated[
+        Optional[Path], typer.Option("--cache-file", help="Path to cache file")
+    ] = None,
+):
+    """Show cache information and statistics."""
+    if cache_file is None:
+        cache_file = Path.cwd() / ".flight_cache.pkl"
+
+    cache = PersistentTTLCache(cache_file)
+    info = cache.cache_info()
+
+    typer.echo("📊 Cache Information")
+    typer.echo("=" * 50)
+    typer.echo(f"Cache file: {info['cache_file']}")
+    typer.echo(f"Entries: {info['entries']}")
+    typer.echo(f"Approximate size: {info['approximate_size_bytes']:,} bytes")
+    typer.echo(
+        f"Default TTL: {info['default_ttl_seconds']} seconds ({info['default_ttl_seconds']//3600}h {(info['default_ttl_seconds']%3600)//60}m)"
+    )
+
+    if info["entries"] == 0:
+        typer.echo("🗂️  Cache is empty")
+    else:
+        typer.echo(f"🗂️  Cache contains {info['entries']} entries")
+
+
+@app.command()
 def search(
     config_path: Annotated[
         Path, typer.Option("--config", help="Path to YAML configuration file")
@@ -561,6 +841,28 @@ def search(
     smtp_port: Annotated[int, typer.Option("--smtp-port", help="SMTP port")] = 587,
     list_searches: Annotated[
         bool, typer.Option("--list", help="List available searches in config file")
+    ] = False,
+    json_output: Annotated[
+        Optional[Path],
+        typer.Option("--json-output", "-j", help="Save results to JSON file"),
+    ] = None,
+    pretty_json: Annotated[
+        bool,
+        typer.Option(
+            "--pretty-json/--compact-json", help="Format JSON with indentation"
+        ),
+    ] = True,
+    cache_file: Annotated[
+        Optional[Path], typer.Option("--cache-file", help="Path to cache file")
+    ] = None,
+    cache_ttl: Annotated[
+        int,
+        typer.Option(
+            "--cache-ttl", help="Cache TTL in seconds (default: 3600 = 1 hour)"
+        ),
+    ] = 3600,
+    no_cache: Annotated[
+        bool, typer.Option("--no-cache", help="Disable caching for this search")
     ] = False,
 ):
     """Run flight searches based on YAML configuration file."""
@@ -610,10 +912,30 @@ def search(
             typer.echo("💡 Use --list to see available searches.")
             raise typer.Exit(1)
 
-    # Initialize searcher
-    searcher = FlightSearcher(email_config=email_config)
+    # Initialize searcher with cache configuration
+    if no_cache:
+        # Use a dummy cache file that won't be used
+        cache_file = Path("/dev/null") if cache_file is None else cache_file
+        cache_ttl = 0  # Immediate expiration
+    elif cache_file is None:
+        cache_file = Path.cwd() / ".flight_cache.pkl"
+
+    searcher = FlightSearcher(
+        email_config=email_config, cache_file=cache_file, cache_ttl=cache_ttl
+    )
+
+    # Show cache info if requested
+    if not no_cache:
+        cache_info = searcher.cache_info()
+        if cache_info["entries"] > 0:
+            typer.echo(
+                f"🗂️  Using cache with {cache_info['entries']} entries (TTL: {cache_ttl}s)"
+            )
+        else:
+            typer.echo(f"🗂️  Cache initialized (TTL: {cache_ttl}s)")
 
     all_results = []
+    search_summaries = []
 
     for config in search_configs:
         typer.echo(f"\n🔍 Running search: {config.name}")
@@ -642,6 +964,20 @@ def search(
                 )
             )
 
+        # Create search summary for JSON output
+        search_summary = SearchSummary(
+            search_name=config.name,
+            search_description=config.description or config.name,
+            origins=config.origins,
+            destinations=config.destinations,
+            start_date=config.start_date,
+            end_date=config.end_date,
+            results_count=len(results),
+            results=results,
+            search_timestamp=datetime.now().isoformat(),
+        )
+        search_summaries.append(search_summary)
+
         # Print results to console
         if results:
             for result in results:
@@ -651,6 +987,16 @@ def search(
             typer.echo(f"❌ No flights found for '{config.name}'")
 
         all_results.extend(results)
+
+    # Save to JSON if requested
+    if json_output:
+        success = searcher.save_results_to_json(
+            search_summaries, json_output, pretty_json
+        )
+        if success:
+            typer.echo(f"💾 Results saved to JSON file: {json_output}")
+        else:
+            typer.echo(f"❌ Failed to save JSON file: {json_output}")
 
     # Summary
     typer.echo(f"\n📊 SUMMARY")
@@ -664,6 +1010,9 @@ def search(
         typer.echo("⚠️  Email was requested but not sent due to configuration issues.")
     else:
         typer.echo("📧 Email not requested - results displayed in console only.")
+
+    if json_output:
+        typer.echo(f"📄 Results saved to: {json_output}")
 
 
 if __name__ == "__main__":

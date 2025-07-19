@@ -13,30 +13,30 @@ searches:
     end_date: "2025-12-07"
     description: "Return from Asia after Thanksgiving"
 
-  - name: "West Coast to Japan Direct"
-    origins: ["sfo", "lax", "sea"]
-    destinations: ["nrt", "hnd"]
-    start_date: "2025-06-01"
-    end_date: "2025-06-15"
-    description: "Summer Japan trip - direct flights only"
+  # - name: "West Coast to Japan Direct"
+  #   origins: ["sfo", "lax", "sea"]
+  #   destinations: ["nrt", "hnd"]
+  #   start_date: "2025-06-01"
+  #   end_date: "2025-06-15"
+  #   description: "Summer Japan trip - direct flights only"
 
-  - name: "East Coast to Europe"
-    origins: ["jfk", "ewr", "bos", "iad"]
-    destinations: ["fra", "lhr", "cdg", "ams", "zur"]
-    start_date: "2025-07-01"
-    end_date: "2025-07-31"
-    description: "Summer Europe vacation"
+  # - name: "East Coast to Europe"
+  #   origins: ["jfk", "ewr", "bos", "iad"]
+  #   destinations: ["fra", "lhr", "cdg", "ams", "zur"]
+  #   start_date: "2025-07-01"
+  #   end_date: "2025-07-31"
+  #   description: "Summer Europe vacation"
 
-  - name: "Short Weekend Trip"
-    origins: ["sfo"]
-    destinations: ["las", "sea", "pdx"]
-    start_date: "2025-08-01"
-    end_date: "2025-08-03"
-    description: "Quick weekend getaway"
+  # - name: "Short Weekend Trip"
+  #   origins: ["sfo"]
+  #   destinations: ["las", "sea", "pdx"]
+  #   start_date: "2025-08-01"
+  #   end_date: "2025-08-03"
+  #   description: "Quick weekend getaway"
 
-  - name: "Holiday Season Australia"
-    origins: ["lax", "sfo", "dfw"]
-    destinations: ["syd", "mel", "bne"]
-    start_date: "2025-12-18"
-    end_date: "2025-12-25"
-    description: "Holiday trip to Australia"
+  # - name: "Holiday Season Australia"
+  #   origins: ["lax", "sfo", "dfw"]
+  #   destinations: ["syd", "mel", "bne"]
+  #   start_date: "2025-12-18"
+  #   end_date: "2025-12-25"
+  #   description: "Holiday trip to Australia"
