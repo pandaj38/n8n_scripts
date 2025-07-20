@@ -4,6 +4,7 @@
 #     "requests",
 #     "typer",
 #     "pyyaml",
+#     "streamlit",
 # ]
 # ///
 """
@@ -15,9 +16,11 @@ import json
 import os
 import pickle
 import smtplib
+import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -29,6 +32,7 @@ import yaml
 from typing_extensions import Annotated
 
 
+# --- Data Classes ---
 @dataclass
 class SearchParams:
     """Parameters for flight search."""
@@ -259,6 +263,7 @@ class SearchSummary:
         }
 
 
+# --- Core Logic ---
 class FlightSearcher:
     """Flight search and filtering service."""
 
@@ -653,7 +658,126 @@ class FlightSearcher:
             return False
 
 
-# CLI Application
+# --- Streamlit UI ---
+def _run_streamlit_ui():
+    """Contains the logic for the Streamlit web application."""
+    import streamlit as st
+
+    st.set_page_config(page_title="Flight Award Search", layout="wide")
+    st.title("✈️ Business Class Award Flight Search")
+
+    # --- Sidebar for Configuration ---
+    st.sidebar.title("⚙️ Configuration")
+    cache_ttl = st.sidebar.number_input(
+        "Cache TTL (seconds)",
+        min_value=60,
+        value=3600,
+        help="Time to live for cached API results.",
+    )
+
+    # Initialize searcher here to use the configured TTL
+    searcher = FlightSearcher(cache_ttl=cache_ttl)
+
+    if st.sidebar.button("Clear API Cache"):
+        searcher.clear_cache()
+        st.sidebar.success("Cache cleared!")
+        st.rerun()
+
+    # Display cache info
+    try:
+        cache_info = searcher.cache_info()
+        st.sidebar.info(
+            f"""
+        **Cache Status**\n
+        - **Entries:** {cache_info['entries']}\n
+        - **Size:** {cache_info['approximate_size_bytes']:,} bytes\n
+        - **TTL:** {cache_info['default_ttl_seconds']}s
+        """
+        )
+    except Exception as e:
+        st.sidebar.error(f"Could not retrieve cache info: {e}")
+
+    # --- Main Search Interface ---
+    st.markdown(
+        "Enter one or more airport codes (IATA) for origins and destinations, separated by commas."
+    )
+
+    # Use columns for a cleaner layout
+    col1, col2 = st.columns(2)
+    with col1:
+        origins_input = st.text_input(
+            "Origin(s)", value="sfo, lax, sea", help="e.g., sfo, lax, jfk"
+        )
+    with col2:
+        destinations_input = st.text_input(
+            "Destination(s)", value="nrt, hnd, icn", help="e.g., lhr, cdg, nrt"
+        )
+
+    # Date inputs
+    today = datetime.now().date()
+    thirty_days_from_now = today + timedelta(days=30)
+    col3, col4 = st.columns(2)
+    with col3:
+        start_date = st.date_input("Start Date", value=today)
+    with col4:
+        end_date = st.date_input("End Date", value=thirty_days_from_now)
+
+    # Search button
+    if st.button("🔍 Search for Flights", type="primary", use_container_width=True):
+        # Validate inputs
+        origins = [code.strip().lower() for code in origins_input.split(",") if code]
+        destinations = [
+            code.strip().lower() for code in destinations_input.split(",") if code
+        ]
+        start_date_str = start_date.strftime("%Y-%m-%d")
+        end_date_str = end_date.strftime("%Y-%m-%d")
+
+        if not origins or not destinations:
+            st.error("Please provide at least one origin and one destination airport.")
+        elif not os.environ.get("SEATS_AERO_PARTNER_AUTH"):
+            st.error(
+                "SEATS_AERO_PARTNER_AUTH environment variable not set. Cannot perform search."
+            )
+        else:
+            with st.spinner("Searching for award flights... This may take a moment."):
+                try:
+                    results = list(
+                        searcher.search_route_combinations(
+                            origins=origins,
+                            destinations=destinations,
+                            start_date=start_date_str,
+                            end_date=end_date_str,
+                        )
+                    )
+
+                    # Store results in session state to persist them
+                    st.session_state.last_results = results
+                    st.session_state.last_search_info = {
+                        "origins": origins,
+                        "destinations": destinations,
+                        "start_date": start_date_str,
+                        "end_date": end_date_str,
+                    }
+
+                except Exception as e:
+                    st.error(f"An error occurred during search: {e}")
+                    st.session_state.last_results = []
+
+    # --- Display Results ---
+    if "last_results" in st.session_state:
+        results = st.session_state.last_results
+        search_info = st.session_state.last_search_info
+        st.markdown("---")
+        if results:
+            st.success(f"Found {len(results)} available business class flights!")
+            # Convert list of dataclass objects to list of dicts for DataFrame
+            results_df = [res.to_dict() for res in results]
+            st.dataframe(results_df, use_container_width=True)
+        else:
+            st.warning("No flights found matching your specified criteria.")
+
+
+# --- CLI Application ---
 app = typer.Typer(help="Search for business class award flights")
 
 
@@ -740,6 +864,34 @@ def create_sample_config(config_path: Path) -> None:
         yaml.dump(sample_config, f, default_flow_style=False, sort_keys=False)
 
     typer.echo(f"✅ Sample configuration created at: {config_path}")
+
+
+# --- Typer CLI Commands ---
+@app.command()
+def ui():
+    """Launch the Streamlit web interface for interactive flight search."""
+    # This command launches Streamlit and tells it to run this same script.
+    # We pass a special argument 'run_streamlit' which is caught in the
+    # __name__ == "__main__" block to mean "run the UI function".
+    script_path = Path(__file__).resolve()
+    command = ["streamlit", "run", str(script_path), "run_streamlit"]
+    try:
+        # Check for the API key before launching
+        if not os.environ.get("SEATS_AERO_PARTNER_AUTH"):
+            typer.echo(
+                "❌ Error: SEATS_AERO_PARTNER_AUTH environment variable not set."
+            )
+            typer.echo("Please set this environment variable to launch the UI.")
+            raise typer.Exit(1)
+
+        typer.echo("🚀 Launching Streamlit UI...")
+        subprocess.run(command, check=True)
+    except FileNotFoundError:
+        typer.echo("❌ Streamlit is not installed. Please run 'pip install streamlit'.")
+    except subprocess.CalledProcessError as e:
+        typer.echo(f"❌ Failed to launch Streamlit interface: {e}")
+    except Exception as e:
+        typer.echo(f"An unexpected error occurred: {e}")
 
 
 @app.command()
@@ -1016,4 +1168,11 @@ def search(
 
 
 if __name__ == "__main__":
-    app()
+    # This logic allows the script to be called in two ways:
+    # 1. As a normal Typer CLI app (e.g., `python flight_search.py search`).
+    # 2. By Streamlit, which calls `streamlit run flight_search.py run_streamlit`.
+    #    The `ui` command triggers the second case.
+    if len(sys.argv) > 1 and sys.argv[1] == "run_streamlit":
+        _run_streamlit_ui()
+    else:
+        app()
